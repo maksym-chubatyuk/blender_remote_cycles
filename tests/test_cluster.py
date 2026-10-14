@@ -155,6 +155,8 @@ check("renaming the master shows up on the network",
 cl.name = "test-master"
 
 # --- split still -----------------------------------------------------------
+prefs = rc.ui.get_prefs()
+prefs.still_mode = "ALL"  # the test nodes differ ~5x in speed; Auto would not split
 render(scene, "CYCLES", os.path.join(OUT, "ref_still.exr"))
 ref = load_rgba(os.path.join(OUT, "ref_still.exr"))
 cl.history.clear()
@@ -163,6 +165,8 @@ render(scene, "REMOTE_CYCLES", os.path.join(OUT, "split_still.exr"))
 print(f"split still took {time.monotonic() - t0:.2f}s")
 chunks = [h for h in cl.history if h[0] == "chunk"]
 check("still was split across both nodes", {h[4] for h in chunks} == {"fast", "slow"},
+      str([(h[2], h[3], h[4]) for h in chunks]))
+check("each machine renders few chunks", max(sum(1 for h in chunks if h[4] == n) for n in ("fast", "slow")) <= 4,
       str([(h[2], h[3], h[4]) for h in chunks]))
 check("all samples rendered exactly once", sorted((h[2], h[3]) for h in chunks)
       and sum(h[3] for h in chunks) == 32)
@@ -179,6 +183,16 @@ similar("denoised split still matches local denoised render", den, ref_den)
 check("denoised split still is actually denoised", noise(den) < noise(ref) * 0.6,
       f"(noise {noise(den):.4f} vs noisy {noise(ref):.4f})")
 scene.cycles.use_denoising = False
+
+# --- Auto: no split with a much slower machine ------------------------------
+prefs.still_mode = "AUTO"
+cl.still_times.clear()
+cl.history.clear()
+render(scene, "REMOTE_CYCLES", os.path.join(OUT, "auto_still.exr"))
+check("Auto renders a still only on the fastest machine when the other is much slower",
+      [h[4] for h in cl.history] == ["fast"], str(list(cl.history)))
+similar("Auto still equals a local render", load_rgba(os.path.join(OUT, "auto_still.exr")), ref, 0.002)
+prefs.still_mode = "ALL"
 
 # --- single node still -----------------------------------------------------
 cl.set_enabled("slow", False)

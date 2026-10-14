@@ -2,6 +2,7 @@
 rendering on the cluster's nodes."""
 
 import os
+import time
 
 import blf
 import bpy
@@ -14,8 +15,28 @@ from .master import FramesJob, SplitJob, ViewportSession
 from .sync import flat_matrix
 
 
+# Auto mode splits a still only across machines at least this fast relative
+# to the fastest one, and only for scenes that take the fastest machine at
+# least this long alone: splitting has fixed costs (separate renders per
+# chunk, no adaptive sampling, merging and denoising on the master).
+SPLIT_MIN_SPEED = 0.4
+SPLIT_MIN_SECONDS = 15.0
+
+
 def get_prefs():
     return bpy.context.preferences.addons[__package__].preferences
+
+
+def still_machines(cl, scene_name, mode):
+    """The machines to render a still on, fastest first; one means no split."""
+    nodes = sorted(cl.render_nodes(), key=lambda n: -n.score)
+    if mode == "FASTEST" or len(nodes) < 2:
+        return nodes[:1]
+    if mode == "ALL":
+        return nodes
+    if cl.still_times.get(scene_name, SPLIT_MIN_SECONDS) < SPLIT_MIN_SECONDS:
+        return nodes[:1]
+    return [n for n in nodes if n.score >= SPLIT_MIN_SPEED * nodes[0].score]
 
 
 def view_params(context, scene):
@@ -124,7 +145,7 @@ class RemoteCyclesEngine(bpy.types.RenderEngine):
         if self.is_animation:
             self._render_animation(cl, scene, layer, size)
         else:
-            self._render_still(cl, scene, layer, size, len(nodes))
+            self._render_still(cl, scene, layer, size)
 
     def _wait(self, cl, job, done, progress):
         """Wait until ``done()``; False if cancelled or failed."""
@@ -148,16 +169,20 @@ class RemoteCyclesEngine(bpy.types.RenderEngine):
                         self.update_progress(fraction)
                 cl.cond.wait(0.25)
 
-    def _render_still(self, cl, scene, layer, size, node_count):
+    def _render_still(self, cl, scene, layer, size):
         c = scene.cycles
         denoise = c.use_denoising
         frame = scene.frame_current_final
+        with cl.lock:
+            machines = still_machines(cl, scene.name, get_prefs().still_mode)
+        ids = [n.id for n in machines]
         self.update_stats("", "Remote Cycles: preparing scene")
         snap = sync.Snapshot()
         # Denoising a merged image needs the vector pass, which motion blur rules out.
-        if node_count >= 2 and not (denoise and scene.render.use_motion_blur):
-            job = SplitJob(cl, snap, scene.name, frame, layer, c.samples, denoise)
+        if len(machines) >= 2 and not (denoise and scene.render.use_motion_blur):
+            job = SplitJob(cl, snap, scene.name, frame, layer, c.samples, denoise, node_ids=ids)
             cl.submit(job)
+            started = time.monotonic()
 
             def progress():
                 busy = sorted({n.name for n in cl.nodes.values() if n.inflight and n.inflight[0] == job.id})
@@ -165,6 +190,8 @@ class RemoteCyclesEngine(bpy.types.RenderEngine):
                         job.samples_done / max(1, job.total))
             if not self._wait(cl, job, lambda: job.phase == "merge", progress):
                 return
+            # Alone, the fastest machine would have needed at least this long.
+            cl.still_times[scene.name] = time.monotonic() - started
             try:
                 self.update_stats("", "Remote Cycles: merging")
                 channels, total = job.merge()
@@ -178,15 +205,17 @@ class RemoteCyclesEngine(bpy.types.RenderEngine):
                 cl.finish(job)
             return
 
-        job = FramesJob(cl, snap, scene.name, [(frame, layer)])
+        job = FramesJob(cl, snap, scene.name, [(frame, layer)], node_ids=ids[:1])
         cl.submit(job)
         item = job.item(frame, layer)
+        started = time.monotonic()
 
         def progress():
             names = [cl.nodes[n].name for n in item["nodes"] if n in cl.nodes]
             return f"Remote Cycles: rendering on {', '.join(names) or '...'}", None
         try:
             if self._wait(cl, job, lambda: item["state"] == "done", progress):
+                cl.still_times[scene.name] = time.monotonic() - started
                 self._load(item["result"], size, layer)
         finally:
             cl.finish(job)

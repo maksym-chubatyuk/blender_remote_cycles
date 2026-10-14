@@ -4,7 +4,7 @@ import json
 import socket
 
 import bpy
-from bpy.props import BoolProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 
 from . import master, node, protocol
 
@@ -107,6 +107,17 @@ class RemoteCyclesPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_use_local_changed,
     )
+    still_mode: EnumProperty(
+        name="Still Images",
+        description="How a single image (F12) is spread over the machines",
+        items=[
+            ("AUTO", "Auto", "Split across machines only when it pays off: they must be at least 40% "
+             "as fast as the fastest, and the image must take the fastest machine 15 s or more"),
+            ("FASTEST", "Fastest Machine", "Render each still whole on the fastest machine"),
+            ("ALL", "All Machines", "Always split stills across every machine"),
+        ],
+        default="AUTO",
+    )
     auto_join: BoolProperty(
         name="Auto-Join",
         description="After you have joined a master once, join it again by itself "
@@ -135,6 +146,7 @@ class RemoteCyclesPreferences(bpy.types.AddonPreferences):
         col.prop(self, "machine_name", placeholder=socket.gethostname())
         col.prop(self, "port")
         col.prop(self, "use_local")
+        col.prop(self, "still_mode")
         col.prop(self, "auto_join")
         col.prop(self, "compress")
         layout.label(text="Pick which devices render in Render Properties > Render Cluster.",
@@ -263,6 +275,7 @@ def draw_hosting(layout, context):
         col.label(text="Not visible to other machines:", icon="HIDE_ON")
         col.label(text="set the render engine to Remote Cycles.")
     layout.prop(prefs, "use_local")
+    layout.prop(prefs, "still_mode")
 
     with cl.lock:
         nodes = sorted(cl.nodes.values(), key=lambda n: (not n.local, -(n.score or 0)))

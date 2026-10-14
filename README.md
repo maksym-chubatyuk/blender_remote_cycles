@@ -83,10 +83,22 @@ The viewport text overlay shows which node is rendering and the current sample c
 
 ### Rendering an image (F12)
 
-- **Two or more nodes:** the image's samples are split between them. Faster nodes get
-  bigger chunks, and chunks get smaller as the work runs out so no GPU sits waiting for
-  another. The pieces are merged on the master and then denoised once.
-- **One node:** the whole image renders there, with adaptive sampling and denoising.
+Splitting one image has fixed costs: every chunk is a separate render, adaptive
+sampling is off, and the master merges and denoises the pieces. So the **Still Images**
+setting (in Render Cluster) decides:
+
+- **Auto** (default): split only across machines at least 40% as fast as the fastest one,
+  and only when the image takes the fastest machine 15 seconds or more. Otherwise the
+  whole image renders on the fastest machine, with adaptive sampling and its own GPU
+  denoising. A much slower machine, like a CPU next to a fast GPU, would add more overhead
+  than speed.
+- **Fastest Machine**: always render stills whole on the fastest machine.
+- **All Machines**: always split. Each machine first takes most of its share in one chunk,
+  then smaller chunks as the work runs out, so none sits waiting for another. The pieces
+  are merged on the master and denoised once; the result is identical to a single-machine
+  render.
+
+Animations are where several machines always help: each renders whole frames on its own.
 
 Blender's usual render window opens; the progress bar and status text show the samples
 finished and which machines are working, and the image appears when the pieces are merged.
@@ -150,6 +162,7 @@ restarts unless `--once` is given. `run_node.py` ships inside the add-on folder
 | Machine Name | How this machine appears to others (defaults to the host name). Applies immediately. |
 | Port | TCP port this Blender listens on for nodes (default 9876). Applies immediately. |
 | Render on This Machine | As the master, also render with this machine's own devices. |
+| Still Images | Auto / Fastest Machine / All Machines; see [Rendering an image](#rendering-an-image-f12). |
 | Auto-Join | After joining a master once, rejoin it whenever it appears (not while this Blender is a master itself). |
 | Compress Viewport Frames | Smaller viewport frames at some CPU cost; helps on Wi-Fi. |
 

@@ -120,13 +120,18 @@ class NodeLink:
 
 
 class Job:
-    def __init__(self, cluster, snapshot, scene_name):
+    def __init__(self, cluster, snapshot, scene_name, node_ids=None):
         self.cluster = cluster
         self.id = next(_ids)
         self.snapshot = snapshot
         self.scene = scene_name
+        self.node_ids = set(node_ids) if node_ids is not None else None
         self.cancelled = False
         self.error = None
+
+    def accepts(self, node):
+        """Whether this job may run on ``node`` (None means any node)."""
+        return self.node_ids is None or node.id in self.node_ids
 
     def work(self, **fields):
         return {"op": "work", "job": self.id, "blend": self.snapshot.key,
@@ -154,8 +159,8 @@ class Job:
 class FramesJob(Job):
     """Whole frames rendered on single nodes, results kept until consumed."""
 
-    def __init__(self, cluster, snapshot, scene_name, items):
-        super().__init__(cluster, snapshot, scene_name)
+    def __init__(self, cluster, snapshot, scene_name, items, node_ids=None):
+        super().__init__(cluster, snapshot, scene_name, node_ids)
         self.items = {}
         self.lookup = {}
         self.pending = collections.deque()
@@ -284,13 +289,14 @@ class FramesJob(Job):
 class SplitJob(Job):
     """One frame whose samples are split across nodes and merged here."""
 
-    def __init__(self, cluster, snapshot, scene_name, frame, layer, total, denoise):
-        super().__init__(cluster, snapshot, scene_name)
+    def __init__(self, cluster, snapshot, scene_name, frame, layer, total, denoise, node_ids=None):
+        super().__init__(cluster, snapshot, scene_name, node_ids)
         self.frame = frame
         self.layer = layer
         self.total = total
         self.denoise = denoise
         self.min_chunk = max(1, total // 32)
+        self.started = set()
         self.pending = [(0, total)]
         self.running = {}
         self.uncollected = collections.defaultdict(list)
@@ -304,9 +310,16 @@ class SplitJob(Job):
         if self.phase != "render" or not self.pending:
             return None
         remaining = sum(count for _, count in self.pending)
-        speeds = [n.score for n in self.cluster.render_nodes()] or [node.score]
+        speeds = [n.score for n in self.cluster.render_nodes() if self.accepts(n)] or [node.score]
         share = node.score / sum(speeds)
-        chunk = max(self.min_chunk, math.ceil(remaining * share / 2))
+        if node.id not in self.started:
+            # Every chunk is a separate render with fixed costs, so the first
+            # one per node is most of its share; the rest shrinks as it runs out.
+            self.started.add(node.id)
+            chunk = math.ceil(self.total * share * 0.75)
+        else:
+            chunk = math.ceil(remaining * share / 2)
+        chunk = max(self.min_chunk, chunk)
         offset, count = self.pending[0]
         take = min(chunk, count)
         if take == count:
@@ -425,6 +438,8 @@ class Cluster:
         self.history = collections.deque(maxlen=1000)
         # Latest finished animation frame per machine, for its preview window.
         self.previews = {}
+        # Seconds a still took on a single machine, per scene name.
+        self.still_times = {}
         self.version = 0
         self.work_dir = tempfile.mkdtemp(prefix="remote_cycles_master_")
         self.server = socket.create_server(("", port))
@@ -643,7 +658,7 @@ class Cluster:
             if job.cancelled or job.error:
                 continue
             for node in nodes:
-                if node.inflight is not None:
+                if node.inflight is not None or not job.accepts(node):
                     continue
                 header = job.next_for(node)
                 if header is None:
